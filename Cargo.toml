@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/keyforge-core",
+    "crates/keyforge-platform",
+    "crates/keyforge-daemon",
+]
+exclude = ["crates/keyforge-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["keyforge contributors"]
+description = "Cross-platform keyboard remapping tool"
+
+[workspace.dependencies]
+keyforge-core = { path = "crates/keyforge-core" }
+keyforge-platform = { path = "crates/keyforge-platform" }
+
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Linux only
+libc = "0.2"
+evdev = "0.13"
+
+# macOS only
+core-foundation = "0.10"
+core-graphics = "0.24"
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
+panic = "abort"
+
+[profile.dev]
+opt-level = 1

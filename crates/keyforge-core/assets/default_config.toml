@@ -1,0 +1,84 @@
+# ===========================================================================
+#  keyforge 配置示例 —— `keyforge init` 会写出这份文件
+#
+#  触发键 (keys / key) 支持通用名：ctrl / shift / alt / meta(cmd,win,super)
+#  通用名在组合键里表示「左右任一」，例如 ["ctrl", "h"] 表示左右 Ctrl 都可以。
+#
+#  动作（每一条映射只能写一个）：
+#    remap        = "leftctrl"        按住期间输出该键（可写组合 "ctrl+shift+t"）
+#    tap          = "escape"          按下时快速按一下
+#    sequence     = ["shift+home", "backspace"]
+#                                     按顺序执行多个和弦：先 Shift+Home 选中，
+#                                     再按 Backspace 删除 → 删除到行首
+#    command      = "..."              激活时执行命令
+#    layer        = "nav"             按住期间激活导航层
+#    toggle_layer = "nav"             按一下切换导航层
+#    block        = true              吞掉这个键
+#    tap_hold     = { tap = "...", hold = "..." }   轻按/长按双角色
+# ===========================================================================
+
+[general]
+default_profile = "default"
+tap_hold_ms = 200            # tap_hold 判定为「长按」的时间
+combo_mode = "exact"         # exact：按键必须完全等于组合；subset：组合是子集即可
+log_level = "info"           # error | warn | info | debug | trace
+# log_file = 'C:\Users\me\AppData\Local\keyforge\keyforge.log'
+# app_probe = "auto"         # Linux：auto 时用 xdotool 探测前台程序，off 关闭
+
+[profiles.default]
+description = "基础层"
+
+# 1) CapsLock：轻按 = Esc，按住 = 左 Ctrl
+[[profiles.default.maps]]
+key = "capslock"
+tap_hold = { tap = "escape", hold = "leftctrl" }
+
+# 2) 组合键：Ctrl + H -> 左方向键
+[[profiles.default.maps]]
+keys = ["ctrl", "h"]
+remap = "left"
+
+# 3) 组合键触发命令（Windows 用 cmd.exe /c，Linux 与 macOS 用 sh -c）
+[[profiles.default.maps]]
+keys = ["leftctrl", "leftalt", "t"]
+command = "echo keyforge: ctrl+alt+t"
+
+# 4) 单键替换：右 Alt 当作右 Ctrl
+[[profiles.default.maps]]
+keys = ["rightalt"]
+remap = "rightctrl"
+
+# 5) 屏蔽 Insert 键
+[[profiles.default.maps]]
+key = "insert"
+block = true
+
+# 6) 按住 F1 时进入 nav 层（松开回到 default）
+[[profiles.default.maps]]
+key = "f1"
+layer = "nav"
+
+[profiles.nav]
+description = "导航层：hjkl 当方向键"
+
+[[profiles.nav.maps]]
+key = "h"
+remap = "left"
+
+[[profiles.nav.maps]]
+key = "j"
+remap = "down"
+
+[[profiles.nav.maps]]
+key = "k"
+remap = "up"
+
+[[profiles.nav.maps]]
+key = "l"
+remap = "right"
+
+# 只在这个程序里生效（名称大小写不敏感，匹配子串）
+[[profiles.nav.maps]]
+keys = ["ctrl", "p"]
+tap = "ctrl+shift+p"
+only_in = ["code", "code.exe", "visual studio code"]

@@ -1,0 +1,23 @@
+[package]
+name = "keyforge-daemon"
+description = "keyforge daemon and command line interface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+keyforge-core = { workspace = true }
+keyforge-platform = { workspace = true }
+
+[[bin]]
+name = "keyforge"
+path = "src/bin/keyforge.rs"
+
+[[bin]]
+name = "keyforged"
+path = "src/bin/keyforged.rs"
+
+[lib]
+name = "keyforge_daemon"
+path = "src/lib.rs"

@@ -1,0 +1,177 @@
+# ===========================================================================
+#  CapsLock <-> Ctrl 互换 + Emacs 风格组合键
+#
+#  装上以后：
+#    CapsLock 位置        = 左 Ctrl（按住可当真正的 Ctrl 用，如 Ctrl+C）
+#    左 Ctrl 位置         = CapsLock（大写锁定）
+#    CapsLock(即 Ctrl)+H  = Backspace
+#    CapsLock+D           = Delete
+#    CapsLock+A           = Home
+#    CapsLock+E           = End
+#    CapsLock+N           = Down
+#    CapsLock+P           = Up
+#    CapsLock+F           = Right
+#    CapsLock+B           = Left
+#    Win+F                = 真正的 Ctrl+F（因为 Ctrl+F 已被上面的映射占用）
+#
+#  用法：
+#    keyforge check --config <本文件>     # 先校验并打印解析结果
+#    keyforge run   --config <本文件>     # 前台运行，改本文件保存即热重载
+# ===========================================================================
+
+[general]
+default_profile = "default"
+tap_hold_ms = 200
+# exact：只有「按下的键集合正好等于组合」才触发，保证组合键不会误伤单键用法
+combo_mode = "exact"
+log_level = "info"
+# log_file = 'C:\Users\me\AppData\Roaming\keyforge\keyforge.log'
+
+[profiles.default]
+description = "CapsLock 当 Ctrl，Ctrl 当 CapsLock，Emacs 风格光标/编辑键"
+
+# ---------------------------------------------------------------------------
+# 1) 组合键放在最前面（引擎按顺序取第一条命中的映射）
+#    触发器写 capslock 而不是 ctrl：这里匹配的是「物理按键」，
+#    而 Ctrl 现在位于 CapsLock 位置。
+# ---------------------------------------------------------------------------
+
+# CapsLock + H -> Backspace
+[[profiles.default.maps]]
+keys = ["capslock", "h"]
+remap = "backspace"
+
+# CapsLock + D -> Delete
+[[profiles.default.maps]]
+keys = ["capslock", "d"]
+remap = "delete"
+
+# CapsLock + A -> Home
+[[profiles.default.maps]]
+keys = ["capslock", "a"]
+remap = "home"
+
+# CapsLock + E -> End
+[[profiles.default.maps]]
+keys = ["capslock", "e"]
+remap = "end"
+
+# CapsLock + N -> 下
+[[profiles.default.maps]]
+keys = ["capslock", "n"]
+remap = "down"
+
+# CapsLock + P -> 上
+[[profiles.default.maps]]
+keys = ["capslock", "p"]
+remap = "up"
+
+# CapsLock + F -> 右
+[[profiles.default.maps]]
+keys = ["capslock", "f"]
+remap = "right"
+
+# CapsLock + B -> 左
+[[profiles.default.maps]]
+keys = ["capslock", "b"]
+remap = "left"
+
+# ---------------------------------------------------------------------------
+# 1b) 右 Ctrl 的等价映射
+#     右 Ctrl 没有参与互换，仍然是「真正的 Ctrl」，所以直接按 右Ctrl+D
+#     会被 shell 当成 EOF（bash 空行时 Ctrl+D 会退出，终端随之关闭）。
+#     这一段让它和 CapsLock 位置行为一致：按哪个 Ctrl 都得到 Delete 等动作。
+#     如果你想让右 Ctrl 保持原样（真 Ctrl），把这一段整体删掉即可。
+# ---------------------------------------------------------------------------
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "h"]
+remap = "backspace"
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "d"]
+remap = "delete"
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "a"]
+remap = "home"
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "e"]
+remap = "end"
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "n"]
+remap = "down"
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "p"]
+remap = "up"
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "f"]
+remap = "right"
+
+[[profiles.default.maps]]
+keys = ["rightctrl", "b"]
+remap = "left"
+
+# Win + F -> 真正的 Ctrl + F（Win 会被自动「收回」，不会跟着发出去）
+[[profiles.default.maps]]
+keys = ["meta", "f"]
+remap = "leftctrl+f"
+
+# CapsLock + U -> 从光标删除到行首（两步：Shift+Home 选中，再 Backspace 删除）
+# sequence 是一个「和弦列表」，按顺序执行，每个和弦都是按下再松开。
+[[profiles.default.maps]]
+keys = ["capslock", "u"]
+sequence = ["shift+home", "backspace"]
+
+# CapsLock + K -> 从光标删除到行尾（Shift+End 选中到行尾，再 Delete 删除）
+[[profiles.default.maps]]
+keys = ["capslock", "k"]
+sequence = ["shift+end", "delete"]
+
+# ---------------------------------------------------------------------------
+# 2) CapsLock 的双角色：轻按 = 大写锁定，按住 = 左 Ctrl
+#
+#    这样 CapsLock 既能当 Ctrl 用（Ctrl+C / Ctrl+V / 长按 + 字母），
+#    又保留了切换大小写的能力（轻点一下）。
+#
+#    注意：不要同时再写 key = "leftctrl" remap = "capslock"（真正的互换），
+#    因为上面的组合键是以物理 Ctrl 为触发器的，那样每按一次 Ctrl 都会切换大写。
+#    想彻底换位、不在乎这一点时，再用下面被注释掉的两行。
+# ---------------------------------------------------------------------------
+
+[[profiles.default.maps]]
+key = "capslock"
+tap_hold = { tap = "capslock", hold = "leftctrl", timeout_ms = 180 }
+
+# 如果你就是想「物理 Ctrl 变成 CapsLock」，改用这两条（并去掉上面的 tap_hold）：
+# [[profiles.default.maps]]
+# key = "capslock"
+# remap = "leftctrl"
+# [[profiles.default.maps]]
+# key = "leftctrl"
+# remap = "capslock"
+#
+# 另一种保留大小写的办法：把 CapsLock 挪到一个不常用的键上，例如
+# [[profiles.default.maps]]
+# key = "rightctrl"
+# remap = "capslock"
+
+# ---------------------------------------------------------------------------
+# 说明与可选调整
+#
+# * 物理左 Ctrl（现在是大写锁定）不会命中上面这些组合：它输出的是 CapsLock。
+#   若你希望「左 Ctrl + D」也变成 Delete，再加一条
+#   [[profiles.default.maps]] keys = ["leftctrl", "d"] remap = "delete"
+#   副作用：按左 Ctrl 本身就等于按了一下 CapsLock（大写锁定会切换）。
+#
+# * 长按 CapsLock 期间按其它字母仍是标准 Ctrl 组合（Ctrl+C / Ctrl+V / Ctrl+Z ...）。
+#
+# * 终端里 Ctrl+D 是 bash 的 EOF：只要映射生效就不会传给 shell。
+#   若在某个窗口里仍会关掉终端，说明那个窗口的按键根本没进到 keyforge 的钩子
+#   （典型原因：前台程序完整性级别高于 keyforge）。用 `keyforge doctor` 看
+#   foreground application 一行以及 MISMATCH 提示即可确认。
+# ---------------------------------------------------------------------------
