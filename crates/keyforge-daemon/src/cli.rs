@@ -157,6 +157,7 @@ pub fn main(argv: Vec<String>, program: &str, default_command: Option<&str>) -> 
         Ok(a) => a,
         Err(e) => {
             eprintln!("{program}: {e}\n\nRun `{program} --help` for usage.");
+            show_daemon_error(program, &e);
             return 2;
         }
     };
@@ -164,9 +165,35 @@ pub fn main(argv: Vec<String>, program: &str, default_command: Option<&str>) -> 
         Ok(code) => code,
         Err(message) => {
             eprintln!("{program}: {message}");
+            show_daemon_error(program, &message);
             1
         }
     }
+}
+
+fn show_daemon_error(program: &str, message: &str) {
+    #[cfg(windows)]
+    if program == "keyforged" {
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBoxW(
+                window: *mut std::ffi::c_void,
+                text: *const u16,
+                title: *const u16,
+                flags: u32,
+            ) -> i32;
+        }
+        let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "Keyforge - startup failed"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), 0x10);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (program, message);
 }
 
 pub fn run(args: &Args, program: &str) -> Result<i32, String> {
@@ -198,10 +225,8 @@ pub fn run(args: &Args, program: &str) -> Result<i32, String> {
         "devices" => cmd_devices(args),
         "stop" => cmd_stop(args),
         "service" => cmd_service(args),
-        "run" => cmd_run(args),
-        other => Err(format!(
-            "unknown command `{other}`; try `{program} --help`"
-        )),
+        "run" => cmd_run(args, cfg!(windows) && program == "keyforged"),
+        other => Err(format!("unknown command `{other}`; try `{program} --help`")),
     }
 }
 
@@ -223,8 +248,14 @@ fn cmd_init(args: &Args) -> Result<i32, String> {
     runtime::load_compiled(&path).map_err(|r| format!("template is invalid:\n{}", r.render()))?;
     println!("wrote {}", path.display());
     println!("\nNext steps:");
-    println!("  1. edit the file, then run `keyforge check --config \"{}\"`", path.display());
-    println!("  2. start it with `keyforge run --config \"{}\"`", path.display());
+    println!(
+        "  1. edit the file, then run `keyforge check --config \"{}\"`",
+        path.display()
+    );
+    println!(
+        "  2. start it with `keyforge run --config \"{}\"`",
+        path.display()
+    );
     if let Some(hint) = platform::permission_hint() {
         println!("\n{hint}");
     }
@@ -297,7 +328,11 @@ fn cmd_check(args: &Args) -> Result<i32, String> {
 }
 
 fn cmd_doctor(args: &Args) -> Result<i32, String> {
-    println!("keyforge {} on {}", keyforge_core::VERSION, std::env::consts::OS);
+    println!(
+        "keyforge {} on {}",
+        keyforge_core::VERSION,
+        std::env::consts::OS
+    );
     println!("platform backend: {}", platform::platform_name());
     println!(
         "backend compiled in: {}",
@@ -317,7 +352,11 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
                     "  OK — {} profiles, {} mappings, {} app filters",
                     compiled.profiles.len(),
                     compiled.map_count(),
-                    if compiled.has_app_filters() { "with" } else { "without" }
+                    if compiled.has_app_filters() {
+                        "with"
+                    } else {
+                        "without"
+                    }
                 );
                 for note in compiled.lint() {
                     println!("  note: {note}");
@@ -382,10 +421,16 @@ fn cmd_doctor(args: &Args) -> Result<i32, String> {
         if autostart.exists() {
             format!("{} (written)", autostart.display())
         } else {
-            format!("not written yet — `keyforge service install` creates {}", autostart.display())
+            format!(
+                "not written yet — `keyforge service install` creates {}",
+                autostart.display()
+            )
         }
     );
-    println!("\nlog file: {}", keyforge_core::paths::default_log_path().display());
+    println!(
+        "\nlog file: {}",
+        keyforge_core::paths::default_log_path().display()
+    );
     Ok(0)
 }
 
@@ -456,7 +501,11 @@ fn cmd_devices(args: &Args) -> Result<i32, String> {
 }
 
 fn cmd_service(args: &Args) -> Result<i32, String> {
-    let action = args.positional.first().map(String::as_str).unwrap_or("print");
+    let action = args
+        .positional
+        .first()
+        .map(String::as_str)
+        .unwrap_or("print");
     match action {
         "print" => {
             let (name, body) = service::render();
@@ -476,7 +525,7 @@ fn cmd_service(args: &Args) -> Result<i32, String> {
     }
 }
 
-fn cmd_run(args: &Args) -> Result<i32, String> {
+fn cmd_run(args: &Args, background: bool) -> Result<i32, String> {
     let path = paths::resolve_config_path(args.config.as_deref());
     if !path.exists() {
         return Err(format!(
@@ -491,14 +540,32 @@ fn cmd_run(args: &Args) -> Result<i32, String> {
     let (level, log_file) = match &raw {
         Ok(config) => (
             args.log_level.unwrap_or(config.general.log_level),
-            args.log_file
-                .clone()
-                .or_else(|| config.general.log_file.clone().map(|p| paths::expand_user(&p))),
+            args.log_file.clone().or_else(|| {
+                config
+                    .general
+                    .log_file
+                    .clone()
+                    .map(|p| paths::expand_user(&p))
+            }),
         ),
-        Err(_) => (args.log_level.unwrap_or(LogLevel::Info), args.log_file.clone()),
+        Err(_) => (
+            args.log_level.unwrap_or(LogLevel::Info),
+            args.log_file.clone(),
+        ),
     };
-    logging::init(level, log_file.as_deref(), true)
-        .map_err(|e| format!("cannot open the log file: {e}"))?;
+    let log_file = log_file.or_else(|| background.then(paths::default_log_path));
+    let general = raw
+        .as_ref()
+        .map(|config| config.general.clone())
+        .unwrap_or_default();
+    logging::init_with_rotation(
+        level,
+        log_file.as_deref(),
+        true,
+        general.log_max_size_mb,
+        general.log_retention_days,
+    )
+    .map_err(|e| format!("cannot open the log file: {e}"))?;
 
     if !platform::backend_available() {
         return Err(format!(

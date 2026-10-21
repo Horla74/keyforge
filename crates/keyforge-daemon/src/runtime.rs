@@ -54,6 +54,7 @@ struct DaemonHost {
     app_filters: bool,
     children: Vec<Child>,
     stop: Arc<AtomicBool>,
+    paused: bool,
 }
 
 impl DaemonHost {
@@ -68,11 +69,12 @@ impl DaemonHost {
             watch: options.watch,
             mtime,
             last_cfg_check: Instant::now(),
-            app_probe: options.app_probe && app_filters,
+            app_probe: options.app_probe,
             last_app_poll: Instant::now(),
             app_filters,
             children: Vec::new(),
             stop,
+            paused: false,
         }
     }
 
@@ -114,17 +116,29 @@ impl DaemonHost {
         }
         self.mtime = mtime;
 
+        self.reload_config()
+    }
+
+    fn reload(&mut self) -> Vec<Output> {
         match load_compiled(&self.config_path) {
             Ok(cfg) => {
+                keyforge_core::logging::set_rotation(
+                    cfg.general.log_max_size_mb,
+                    cfg.general.log_retention_days,
+                );
                 log_info!(
-                    "config changed, reloading {} ({} profiles, {} mappings); keys held right now \
+                    "reloading {} ({} profiles, {} mappings); keys held right now \
                      are released — prefer restarting while typing",
                     self.config_path.display(),
                     cfg.profiles.len(),
                     cfg.map_count()
                 );
                 self.app_filters = cfg.has_app_filters();
-                self.app_probe = self.app_probe || self.app_filters;
+                self.mtime = std::fs::metadata(&self.config_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                self.last_app_poll = Instant::now() - Duration::from_millis(200);
+                self.poll_front_app();
                 // replace_config releases keys that are still held, so those
                 // releases have to reach the OS as well.
                 self.engine.replace_config(cfg)
@@ -167,7 +181,30 @@ impl DaemonHost {
 }
 
 impl Host for DaemonHost {
+    fn config_path(&self) -> Option<&std::path::Path> {
+        Some(&self.config_path)
+    }
+    fn reload_config(&mut self) -> Vec<Output> {
+        self.reload()
+    }
+
+    fn toggle_pause(&mut self) -> Vec<Output> {
+        self.paused = !self.paused;
+        log_info!(
+            "remapping {}",
+            if self.paused { "paused" } else { "resumed" }
+        );
+        self.engine.release_all()
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused
+    }
+
     fn on_key(&mut self, key: KeyCode, state: KeyState) -> Outcome {
+        if self.paused {
+            return Outcome::default();
+        }
         let outcome = self.engine.on_key(key, state);
         if let Some(what) = self.engine.take_last_activation() {
             log_info!(
@@ -190,7 +227,9 @@ impl Host for DaemonHost {
 
     fn on_tick(&mut self) -> Vec<Output> {
         let mut outputs = self.reload_if_changed();
-        outputs.extend(self.engine.on_tick(Instant::now()));
+        if !self.paused {
+            outputs.extend(self.engine.on_tick(Instant::now()));
+        }
         self.reap_children();
         self.poll_front_app();
         outputs
@@ -260,7 +299,12 @@ impl Host for DaemonHost {
 }
 
 /// Run the daemon until Ctrl+C (or the platform fails).
-pub fn run(options: RunOptions) -> Result<(), String> {
+pub fn run(mut options: RunOptions) -> Result<(), String> {
+    if options.config_path.is_relative() {
+        options.config_path = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(&options.config_path);
+    }
     let compiled = load_compiled(&options.config_path).map_err(|report| {
         format!(
             "cannot use {}:\n{}",
@@ -297,7 +341,7 @@ pub fn run(options: RunOptions) -> Result<(), String> {
         log_info!("config hot reload is ON: saving the file applies changes immediately");
     } else {
         log_info!(
-            "config hot reload is OFF (default): restart keyforge to apply config changes \
+            "config hot reload is OFF (default): use Reload config in the tray or restart keyforge \
              (`--watch` enables live reload)"
         );
     }
@@ -316,4 +360,101 @@ pub fn run(options: RunOptions) -> Result<(), String> {
     let result = platform::run(Box::new(host), platform_options).map_err(|e| e.to_string());
     log_info!("keyforge stopped");
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host() -> DaemonHost {
+        let config = keyforge_core::config::parse_toml(
+            r#"
+[profiles.default]
+[[profiles.default.maps]]
+key = "f13"
+remap = "f14"
+"#,
+        )
+        .unwrap();
+        let mut options = RunOptions::new(PathBuf::from("unused.toml"));
+        options.watch = false;
+        DaemonHost::new(
+            Engine::new(compile(&config).unwrap()),
+            options,
+            Arc::new(AtomicBool::new(false)),
+        )
+    }
+
+    #[test]
+    fn pause_releases_injected_keys_and_passes_input_until_resumed() {
+        let mut host = host();
+        assert_eq!(
+            host.on_key(KeyCode::F13, KeyState::Down).outputs,
+            vec![Output::KeyDown(KeyCode::F14)]
+        );
+        assert_eq!(host.toggle_pause(), vec![Output::KeyUp(KeyCode::F14)]);
+        assert!(host.is_paused());
+        for state in [KeyState::Up, KeyState::Down, KeyState::Up] {
+            let result = host.on_key(KeyCode::F13, state);
+            assert!(!result.swallow);
+            assert!(result.outputs.is_empty());
+        }
+        assert!(host.on_tick().is_empty());
+        assert!(host.toggle_pause().is_empty());
+        assert!(!host.is_paused());
+        assert_eq!(
+            host.on_key(KeyCode::F13, KeyState::Down).outputs,
+            vec![Output::KeyDown(KeyCode::F14)]
+        );
+        assert_eq!(host.on_shutdown(), vec![Output::KeyUp(KeyCode::F14)]);
+    }
+
+    #[test]
+    fn manual_reload_works_without_watch_and_rejects_invalid_config() {
+        let mut host = host();
+        let dir = std::env::temp_dir().join(format!("keyforge-reload-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        host.config_path = dir.join("config.toml");
+        std::fs::write(
+            &host.config_path,
+            r#"
+[profiles.default]
+[[profiles.default.maps]]
+key = "f13"
+remap = "f15"
+only_in = ["editor"]
+"#,
+        )
+        .unwrap();
+        host.app_probe = false;
+        host.on_key(KeyCode::F13, KeyState::Down);
+        assert_eq!(host.reload_config(), vec![Output::KeyUp(KeyCode::F14)]);
+        assert!(!host.app_probe, "reload must respect --no-app-probe");
+        host.engine.set_front_app(Some("editor.exe".into()));
+        host.on_key(KeyCode::F13, KeyState::Up);
+        assert_eq!(
+            host.on_key(KeyCode::F13, KeyState::Down).outputs,
+            vec![Output::KeyDown(KeyCode::F15)]
+        );
+        std::fs::write(&host.config_path, "invalid = [").unwrap();
+        assert!(host.reload_config().is_empty());
+        // A failed reload keeps both the configuration and held-key state.
+        assert_eq!(
+            host.on_key(KeyCode::F13, KeyState::Up).outputs,
+            vec![Output::KeyUp(KeyCode::F15)]
+        );
+        assert_eq!(
+            host.on_key(KeyCode::F13, KeyState::Down).outputs,
+            vec![Output::KeyDown(KeyCode::F15)]
+        );
+        host.toggle_pause();
+        std::fs::write(&host.config_path, "[profiles.default]\n").unwrap();
+        assert!(host.reload_config().is_empty());
+        assert!(
+            host.is_paused(),
+            "reloading must not resume a paused daemon"
+        );
+        std::fs::remove_file(&host.config_path).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+    }
 }

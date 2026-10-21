@@ -4,7 +4,6 @@
 //! daemon only needs level filtering and a timestamp.
 
 use std::fmt;
-use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -12,9 +11,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::LogLevel;
 
+mod file;
+use file::RollingFile;
+
 struct Sink {
     level: LogLevel,
-    file: Option<Mutex<File>>,
+    file: Option<Mutex<RollingFile>>,
     stderr: bool,
 }
 
@@ -22,15 +24,32 @@ static SINK: OnceLock<Sink> = OnceLock::new();
 
 /// Install the global logger. Safe to call more than once; the first call wins.
 pub fn init(level: LogLevel, file: Option<&Path>, stderr: bool) -> std::io::Result<()> {
+    init_with_rotation(level, file, stderr, 10, 7)
+}
+
+pub fn init_with_rotation(
+    level: LogLevel,
+    file: Option<&Path>,
+    stderr: bool,
+    max_size_mb: u64,
+    retention_days: u32,
+) -> std::io::Result<()> {
+    let max_bytes = max_size_mb
+        .checked_mul(1024 * 1024)
+        .filter(|n| *n > 0)
+        .filter(|_| retention_days > 0)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "log size and retention days must be positive and within range",
+            )
+        })?;
     let opened = match file {
-        Some(path) => {
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::create_dir_all(dir);
-            }
-            Some(Mutex::new(
-                OpenOptions::new().create(true).append(true).open(path)?,
-            ))
-        }
+        Some(path) => Some(Mutex::new(RollingFile::open(
+            path,
+            max_bytes,
+            retention_days,
+        )?)),
         None => None,
     };
     let _ = SINK.set(Sink {
@@ -39,6 +58,20 @@ pub fn init(level: LogLevel, file: Option<&Path>, stderr: bool) -> std::io::Resu
         stderr,
     });
     Ok(())
+}
+
+/// Apply rotation settings from a successfully validated config reload.
+pub fn set_rotation(max_size_mb: u64, retention_days: u32) {
+    if let Some(max_bytes) = max_size_mb.checked_mul(1024 * 1024).filter(|n| *n > 0) {
+        if retention_days == 0 {
+            return;
+        }
+        if let Some(file) = SINK.get().and_then(|s| s.file.as_ref()) {
+            if let Ok(mut file) = file.lock() {
+                file.set_limits(max_bytes, retention_days);
+            }
+        }
+    }
 }
 
 pub fn level_enabled(level: LogLevel) -> bool {
@@ -67,8 +100,9 @@ pub fn log(level: LogLevel, args: fmt::Arguments<'_>) {
             }
             if let Some(file) = &sink.file {
                 if let Ok(mut f) = file.lock() {
-                    let _ = writeln!(f, "{line}");
-                    let _ = f.flush();
+                    if let Err(error) = f.write(&line, file::now()) {
+                        let _ = writeln!(std::io::stderr(), "log file error: {error}\n{line}");
+                    }
                 }
             }
         }

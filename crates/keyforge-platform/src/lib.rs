@@ -28,6 +28,20 @@ pub trait Host {
     fn on_key(&mut self, key: KeyCode, state: KeyState) -> Outcome;
     /// Periodic timer work (tap-hold deadlines, config reload, app polling).
     fn on_tick(&mut self) -> Vec<Output>;
+    /// Manually reload configuration, even when file watching is disabled.
+    fn reload_config(&mut self) -> Vec<Output> {
+        Vec::new()
+    }
+    /// Suspend/resume mappings, releasing owned keys before suspension.
+    fn toggle_pause(&mut self) -> Vec<Output> {
+        Vec::new()
+    }
+    fn is_paused(&self) -> bool {
+        false
+    }
+    fn config_path(&self) -> Option<&std::path::Path> {
+        None
+    }
     /// Execute a `command` mapping.
     fn run_command(&mut self, command: &str);
     /// Polled every loop iteration; returning `true` shuts the backend down.

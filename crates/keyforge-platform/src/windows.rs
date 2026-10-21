@@ -21,6 +21,8 @@ use keyforge_core::{KeyCode, KeyState, Output};
 
 use crate::{Error, Host, Result};
 
+mod tray;
+
 // ---------------------------------------------------------------------------
 // Win32 declarations
 // ---------------------------------------------------------------------------
@@ -450,7 +452,10 @@ pub fn run(host: Box<dyn Host>) -> Result<()> {
 
     HOST.with(|slot| *slot.borrow_mut() = Some(host));
     keyforge_core::log_info!("keyboard hook installed (thread {tid}); remapping is live");
-    let result = message_loop();
+    let result = match tray::Tray::new() {
+        Ok(tray) => message_loop(&tray),
+        Err(error) => Err(error),
+    };
 
     // Give back every key we still hold, otherwise a mapping that happened to
     // be active while stopping would stay pressed in the system.
@@ -473,7 +478,7 @@ fn release_stop_event() {
     }
 }
 
-fn message_loop() -> Result<()> {
+fn message_loop(tray: &tray::Tray) -> Result<()> {
     let mut msg: Msg = unsafe { std::mem::zeroed() };
     loop {
         if STOP.load(Ordering::SeqCst) {
@@ -510,6 +515,11 @@ fn message_loop() -> Result<()> {
             }
             if msg.message == WM_APP_KEYFORGE {
                 run_queued_commands();
+                continue;
+            }
+            if msg.message == tray::WM_TRAY_COMMAND {
+                tray::handle_command(msg.w_param);
+                tray.update();
                 continue;
             }
             unsafe {

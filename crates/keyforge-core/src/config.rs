@@ -42,6 +42,12 @@ pub struct General {
     /// Optional log file (in addition to stderr).
     #[serde(default)]
     pub log_file: Option<String>,
+    /// Maximum size of each log file, in MiB.
+    #[serde(default = "default_log_max_size_mb")]
+    pub log_max_size_mb: u64,
+    /// Days to retain rotated log archives.
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u32,
     /// How the focused application is detected on Linux.
     #[serde(default)]
     pub app_probe: AppProbe,
@@ -55,6 +61,8 @@ impl Default for General {
             combo_mode: ComboMode::default(),
             log_level: LogLevel::default(),
             log_file: None,
+            log_max_size_mb: default_log_max_size_mb(),
+            log_retention_days: default_log_retention_days(),
             app_probe: AppProbe::default(),
         }
     }
@@ -62,6 +70,31 @@ impl Default for General {
 
 fn default_profile_name() -> String {
     "default".to_string()
+}
+
+fn default_log_max_size_mb() -> u64 {
+    10
+}
+fn default_log_retention_days() -> u32 {
+    7
+}
+
+#[cfg(test)]
+mod log_config_tests {
+    use super::*;
+
+    #[test]
+    fn logging_defaults_and_limits_are_validated() {
+        let cfg = CompiledConfig::from_toml_str("[profiles.default]").unwrap();
+        assert_eq!(cfg.general.log_max_size_mb, 10);
+        assert_eq!(cfg.general.log_retention_days, 7);
+        let cfg = CompiledConfig::from_toml_str("[general]\nlog_max_size_mb = 2\nlog_retention_days = 3\n[profiles.default]").unwrap();
+        assert_eq!(cfg.general.log_max_size_mb, 2);
+        assert_eq!(cfg.general.log_retention_days, 3);
+        for invalid in ["log_max_size_mb = 0", "log_retention_days = 0", "log_max_size_mb = -1", "log_max_size_mb = 9223372036854775807"] {
+            assert!(CompiledConfig::from_toml_str(&format!("[general]\n{invalid}\n[profiles.default]")).is_err());
+        }
+    }
 }
 
 fn default_tap_hold_ms() -> u64 {
@@ -455,6 +488,14 @@ pub fn parse_chord(s: &str) -> Result<Vec<KeyCode>, String> {
 impl CompiledConfig {
     pub fn compile(config: &Config) -> Result<CompiledConfig, Report> {
         let mut report = Report::default();
+        if config.general.log_max_size_mb == 0
+            || config.general.log_max_size_mb > u64::MAX / (1024 * 1024)
+        {
+            report.errors.push("general.log_max_size_mb must be positive and fit in bytes".into());
+        }
+        if config.general.log_retention_days == 0 {
+            report.errors.push("general.log_retention_days must be positive".into());
+        }
         if config.profiles.is_empty() {
             report.errors.push(
                 "no profiles defined; add a `[profiles.default]` section".to_string(),

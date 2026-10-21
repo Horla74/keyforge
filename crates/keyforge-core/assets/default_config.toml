@@ -22,7 +22,9 @@ default_profile = "default"
 tap_hold_ms = 200            # tap_hold 判定为「长按」的时间
 combo_mode = "exact"         # exact：按键必须完全等于组合；subset：组合是子集即可
 log_level = "info"           # error | warn | info | debug | trace
-# log_file = 'C:\Users\me\AppData\Local\keyforge\keyforge.log'
+log_max_size_mb = 10         # 单个日志文件上限（MiB，正整数），达到后自动归档
+log_retention_days = 7       # 归档日志保留天数（正整数）
+# log_file = 'C:\Users\me\AppData\Roaming\keyforge\keyforge.log'
 # app_probe = "auto"         # Linux：auto 时用 xdotool 探测前台程序，off 关闭
 
 [profiles.default]

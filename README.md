@@ -3,10 +3,11 @@
 跨平台键盘改键工具（Rust）。当前完成 **Windows** 后端；Linux / macOS 后端代码已写好骨架但
 **暂停接入**（见下方「进度」）。
 
-- 无 UI，作为后台服务/守护进程运行（`keyforged`），配套 CLI（`keyforge`）
+- 后台守护进程（`keyforged`）配套 CLI（`keyforge`）；Windows 提供系统托盘菜单
 - 配置为 TOML：支持**组合键**、单键替换、层（layer）、轻按/长按双角色（tap-hold）、
   执行命令、屏蔽按键、按前台程序过滤
-- 配置热重载：**默认关闭**；加 `--watch` 后改完文件保存即生效（热重载会丢弃当时正按住的按键状态，所以默认要求重启）
+- 配置热重载：**默认关闭**；可从托盘菜单手动重载，或加 `--watch` 后改完文件保存即生效
+  （重载会清理当时的改键状态，建议先松开按键）
 - 零第三方平台依赖：Windows 后端直接用 Win32 FFI（`WH_KEYBOARD_LL` + `SendInput`）
 
 ---
@@ -38,15 +39,32 @@ cargo build --release
 # 3) 环境自检：完整性级别、钩子可用性、注入能力、前台程序识别
 .\target\release\keyforge.exe doctor
 
-# 4) 前台运行（Ctrl+C 退出）；编辑配置后需重启，或加 --watch 使用热重载
+# 4) 前台运行（Ctrl+C 退出）；编辑配置后可从托盘手动重载，或加 --watch 使用热重载
 .\target\release\keyforge.exe run -v
 ```
 
-也可以直接用守护进程二进制（等价于 `keyforge run`）：
+也可以直接运行守护进程二进制。Windows 下 `keyforged.exe` 不显示控制台日志窗口，
+会在任务栏右侧通知区域显示托盘图标（可能收纳在「显示隐藏的图标」中）：
 
 ```powershell
 .\target\release\keyforged.exe --config "$env:APPDATA\keyforge\config.toml" --log-level debug
 ```
+
+右键托盘图标可选择：
+
+- **Config: …**：显示当前实际使用的配置文件完整路径。
+- **Open config folder**：在资源管理器中打开该配置文件所在文件夹。
+- **Reload config**：立即重载配置，无需 `--watch`。配置无效时保留原配置，错误写入日志。
+- **Pause / Resume**：暂停 / 恢复改键；暂停先释放仍按住的注入键，暂停期间键盘输入正常通过。
+  暂停期间重载配置不会自动恢复改键。
+- **Exit**：释放仍按住的注入键、移除键盘钩子并退出。
+
+运行图标为绿色 **K**，暂停图标为红色 **S**，提示文字显示 running / paused 状态。
+图标已嵌入 exe，无需额外复制；源文件位于 `crates/keyforge-platform/assets/`，
+可运行 `scripts/generate-icons.ps1` 重新生成。`keyforged.exe` 默认将日志写入
+`%APPDATA%\keyforge\keyforge.log`，可通过配置 `log_file` 或 `--log-file` 覆盖；
+启动失败会弹出错误提示。需要查看前台日志时使用 `keyforge run -v`（也有托盘菜单）。
+重载或暂停会清理当前按键状态，建议先松开键盘再使用这些菜单。
 
 ### 常用命令
 
@@ -78,6 +96,8 @@ default_profile = "default"   # 基础层（profile）名字
 tap_hold_ms     = 200         # tap_hold 判定为“长按”的毫秒数
 combo_mode      = "exact"     # exact：按键集合必须完全等于组合；subset：组合是子集即可
 log_level       = "info"      # error | warn | info | debug | trace
+log_max_size_mb  = 10          # 单个日志文件上限，单位 MiB，必须为正整数
+log_retention_days = 7         # 归档保留天数，必须为正整数
 # log_file      = 'C:\Users\me\AppData\Roaming\keyforge\keyforge.log'
 # app_probe     = "auto"      # Linux 用 xdotool 探测前台程序；off 关闭
 
@@ -88,6 +108,12 @@ description = "基础层"
 key = "capslock"
 tap_hold = { tap = "escape", hold = "leftctrl" }
 ```
+
+日志在下一条记录将超过大小上限时归档；单条超大记录会完整保留，可能单独超过上限。
+持续运行时也会按 24 小时归档。归档保存在日志文件旁，格式为
+`keyforge.log.archive-<Unix时间戳>-<序号>.log`。启动时和写日志时（最多每小时一次）
+清理超过保留天数的归档，不删除其他文件。大小与保留天数支持 **Reload config** / `--watch`
+生效；日志路径和日志级别的更改仍需重启。
 
 ### 3.1 触发器
 
@@ -176,7 +202,7 @@ sequence = ["shift+home", "backspace"]
 6. **钩子内不跑命令**：`command` 只做入队，由消息循环执行，避免阻塞输入链（钩子超时会被系统摘除）。
 7. **热重载（`--watch`，默认关闭）**：配置变更后重建引擎，并把当前按住的映射**先释放**；
    被"扣住"的 Win 按键状态会跨重载保留。因为重载必然丢弃"此刻正按住"的按键状态，
-   默认要求重启进程来生效。
+   默认使用托盘菜单手动重载或重启进程来生效。
 
 ---
 
@@ -193,6 +219,7 @@ keyforge/
 │  │  └─ assets/default_config.toml  示例配置（`keyforge init` 的模板）
 │  ├─ keyforge-platform/          平台后端
 │  │  ├─ src/windows.rs           WH_KEYBOARD_LL + SendInput + 前台程序 + doctor 探针
+│  │  ├─ src/windows/tray.rs      通知区域图标、重载 / 暂停 / 恢复 / 退出菜单
 │  │  └─ src/linux.rs             ⏸ evdev/uinput 实现（未接入模块树）
 │  └─ keyforge-daemon/            `keyforge` / `keyforged` 两个二进制
 │     ├─ src/runtime.rs           Host 实现：热重载、命令执行、前台程序轮询、日志
@@ -206,6 +233,7 @@ keyforge/
 ```bash
 cargo test                         # 单元测试 + CLI 测试（端到端测试被标记为 ignore）
 cargo test -p keyforge-daemon --test windows_e2e -- --ignored   # 真实按键端到端
+cargo test -p keyforge-daemon --test windows_tray -- --ignored  # 托盘生命周期（需交互桌面且无现有实例）
 cargo test -p keyforge-core                                     # 只看引擎/配置/键码
 ```
 
@@ -224,15 +252,15 @@ cargo test -p keyforge-core                                     # 只看引擎/�
   开机自启用 `keyforge service install` 生成计划任务（登录触发）。
 - 不需要管理员权限；但若前台窗口属于**更高完整性级别**的进程（例如以管理员身份运行的程序），
   注入到该窗口的按键会被 Windows 的 UIPI 拦下。需要覆盖这类窗口时，请让 keyforge 也以管理员身份运行。
-- 日志默认写 stderr；`log_file` 或 `--log-file` 可同时落盘（默认路径
-  `%APPDATA%\keyforge\keyforge.log`）。
-- 退出：Ctrl+C（会移除钩子，不会残留吞键状态）。
+- `keyforge run` 日志默认写 stderr；`log_file` 或 `--log-file` 可同时落盘。
+  `keyforged.exe` 默认写 `%APPDATA%\keyforge\keyforge.log`。
+- 退出：托盘菜单 **Exit**、`keyforge stop`，或前台运行时 Ctrl+C（均会释放注入键并移除钩子）。
 
 ## 8. 已知限制 / 路线图
 
 - Linux / macOS 后端：代码骨架已完成，需接入模块树 + 依赖（`evdev` / `core-graphics`）并实机验证；
   Linux 启动需要 `sudo` 或 `input` 组 + uinput 权限，macOS 需要「辅助功能」授权。
-- 未包含图形界面：本里程碑按需求以「无 UI 只运行服务 + CLI」交付；后续可加 GPUI 前端
+- Windows 已提供托盘控制，尚未包含配置编辑图形界面；后续可加 GPUI 前端
   （读写同一份 TOML，通过 `--output`/配置热重载生效）。
 - 输入法/Unicode 输入（发送任意字符串）未实现，目前只合成按键。
 - 鼠标按键映射未实现。
