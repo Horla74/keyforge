@@ -181,6 +181,14 @@ impl DaemonHost {
 }
 
 impl Host for DaemonHost {
+    fn reset_input(&mut self) -> Vec<Output> {
+        let outputs = self.engine.release_all();
+        self.engine.set_front_app(None);
+        self.last_app_poll = Instant::now() - Duration::from_millis(200);
+        self.poll_front_app();
+        log_info!("input state reset after session/power transition");
+        outputs
+    }
     fn config_path(&self) -> Option<&std::path::Path> {
         Some(&self.config_path)
     }
@@ -383,6 +391,22 @@ remap = "f14"
             options,
             Arc::new(AtomicBool::new(false)),
         )
+    }
+
+    #[test]
+    fn desktop_recovery_releases_keys_and_preserves_pause() {
+        let mut host = host();
+        host.on_key(KeyCode::F13, KeyState::Down);
+        // The corresponding physical key-up was lost on the lock desktop.
+        assert_eq!(host.reset_input(), vec![Output::KeyUp(KeyCode::F14)]);
+        assert_eq!(
+            host.on_key(KeyCode::F13, KeyState::Down).outputs,
+            vec![Output::KeyDown(KeyCode::F14)]
+        );
+        host.toggle_pause();
+        assert!(host.reset_input().is_empty());
+        assert!(host.is_paused());
+        assert!(!host.on_key(KeyCode::F13, KeyState::Down).swallow);
     }
 
     #[test]

@@ -141,7 +141,13 @@ extern "system" {
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
-pub(super) struct Tray(Hwnd);
+#[link(name = "wtsapi32")]
+extern "system" {
+    fn WTSRegisterSessionNotification(window: Hwnd, flags: u32) -> Bool;
+    fn WTSUnRegisterSessionNotification(window: Hwnd) -> Bool;
+}
+
+pub(super) struct Tray(Hwnd, std::cell::Cell<bool>);
 
 impl Tray {
     pub(super) fn new() -> Result<Self> {
@@ -190,7 +196,13 @@ impl Tray {
             if window.is_null() {
                 return Err(Error::new("cannot create the tray window"));
             }
-            let tray = Self(window);
+            let tray = Self(window, std::cell::Cell::new(false));
+            tray.ensure_session_notifications();
+            if !tray.1.get() {
+                keyforge_core::log_warn!(
+                    "session notifications unavailable; registration will be retried"
+                );
+            }
             ICONS.with(|slot| *slot.borrow_mut() = Some(icons));
             if !notify(window, 0) {
                 return Err(Error::new("cannot add the keyforge notification icon"));
@@ -205,12 +217,22 @@ impl Tray {
             keyforge_core::log_warn!("cannot update the keyforge notification icon");
         }
     }
+
+    pub(super) fn ensure_session_notifications(&self) {
+        // The terminal services dependency can still be starting at user logon.
+        if !self.1.get() && unsafe { WTSRegisterSessionNotification(self.0, 0) } != 0 {
+            self.1.set(true); // NOTIFY_FOR_THIS_SESSION
+        }
+    }
 }
 
 impl Drop for Tray {
     fn drop(&mut self) {
         notify(self.0, 2);
         unsafe {
+            if self.1.get() {
+                WTSUnRegisterSessionNotification(self.0);
+            }
             DestroyWindow(self.0);
         }
         ICONS.with(|slot| slot.borrow_mut().take());
@@ -241,6 +263,24 @@ fn notify(window: Hwnd, message: u32) -> bool {
 }
 
 unsafe extern "system" fn window_proc(window: Hwnd, msg: u32, wp: Wparam, lp: Lparam) -> Lresult {
+    if msg == 0x02B1 {
+        // WM_WTSSESSION_CHANGE
+        match wp {
+            2 | 4 | 7 => request_input_recovery(false), // disconnect / lock
+            1 | 3 | 8 | 15 => request_input_recovery(true), // connect / unlock / desktop ready
+            _ => {}
+        }
+        return 0;
+    }
+    if msg == 0x0218 {
+        // WM_POWERBROADCAST
+        match wp {
+            4 => request_input_recovery(false),         // PBT_APMSUSPEND
+            6 | 7 | 18 => request_input_recovery(true), // critical / suspend / automatic resume
+            _ => {}
+        }
+        return 1;
+    }
     let restart = TASKBAR_CREATED.load(Ordering::SeqCst);
     if restart != 0 && msg == restart {
         if !notify(window, 0) {

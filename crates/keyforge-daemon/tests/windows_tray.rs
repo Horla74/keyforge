@@ -28,6 +28,7 @@ extern "system" {
     fn FindWindowW(class: *const u16, title: *const u16) -> *mut c_void;
     fn GetWindowThreadProcessId(window: *mut c_void, pid: *mut u32) -> u32;
     fn PostThreadMessageW(thread: u32, message: u32, wp: usize, lp: isize) -> i32;
+    fn PostMessageW(window: *mut c_void, message: u32, wp: usize, lp: isize) -> i32;
 }
 
 struct Running(Child);
@@ -89,6 +90,19 @@ fn tray_commands_reload_pause_resume_and_exit() {
     let command = |id| assert_ne!(unsafe { PostThreadMessageW(thread, 0x8000 + 9, id, 0) }, 0);
     command(2);
     wait_for(|| log_contains(&log, "remapping paused"));
+    // Exercise actual window dispatch and native hook replacement, without
+    // locking the user's workstation or putting it to sleep.
+    let window = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+    for (index, (message, event)) in [(0x02B1, 8), (0x0218, 18)].into_iter().enumerate() {
+        assert_ne!(unsafe { PostMessageW(window, message, event, 0) }, 0);
+        wait_for(|| {
+            std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .matches("keyboard hook reinstalled after desktop recovery")
+                .count()
+                > index
+        });
+    }
     std::fs::write(
         &config,
         "[profiles.default]\n[[profiles.default.maps]]\nkey = 'f13'\nremap = 'f14'\n",

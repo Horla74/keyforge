@@ -42,6 +42,11 @@ pub trait Host {
     fn config_path(&self) -> Option<&std::path::Path> {
         None
     }
+    /// Forget keys whose release may have occurred on another desktop.
+    /// This must preserve the user's explicit pause state.
+    fn reset_input(&mut self) -> Vec<Output> {
+        Vec::new()
+    }
     /// Execute a `command` mapping.
     fn run_command(&mut self, command: &str);
     /// Polled every loop iteration; returning `true` shuts the backend down.

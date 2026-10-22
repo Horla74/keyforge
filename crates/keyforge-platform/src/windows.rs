@@ -5,9 +5,8 @@
 //! * The hook must live on a thread that pumps messages, so the daemon's main
 //!   thread becomes that thread and `MsgWaitForMultipleObjectsEx` replaces a
 //!   plain `GetMessage` loop so timers (tap-hold, config reload) still run.
-//! * `SendInput` is never called from inside the hook procedure: the hook only
-//!   decides and queues, the message loop injects. This avoids the documented
-//!   re-entrancy problems of low level hooks.
+//! * Key output is injected synchronously inside the hook; shell commands are
+//!   queued for the message loop. Reentrant hooks use try_borrow_mut.
 //! * Injected events carry a magic `dwExtraInfo` value and are passed straight
 //!   through, so the hook can never remap its own output.
 
@@ -200,6 +199,50 @@ static THREAD_ID: AtomicU32 = AtomicU32::new(0);
 /// Handle of the named stop event (0 when not created).
 static STOP_EVENT: AtomicUsize = AtomicUsize::new(0);
 static HANDLER: Once = Once::new();
+// Window callbacks only set flags; host mutation and hook replacement run in
+// the outer message loop, outside nested window/menu callbacks.
+static RECOVERY: AtomicU32 = AtomicU32::new(0);
+
+fn request_input_recovery(reinstall: bool) {
+    RECOVERY.fetch_or(if reinstall { 3 } else { 1 }, Ordering::SeqCst);
+}
+
+#[derive(Default)]
+struct HookRecovery {
+    retry_at: Option<std::time::Instant>,
+}
+
+impl HookRecovery {
+    fn process(&mut self, hook: &mut Hhook) {
+        let flags = RECOVERY.swap(0, Ordering::SeqCst);
+        if flags & 1 != 0 {
+            COMMANDS.with(|q| q.borrow_mut().clear());
+            with_host(|host| {
+                let outputs = host.reset_input();
+                deliver(host, outputs);
+            });
+        }
+        if flags & 2 != 0 {
+            self.retry_at = Some(std::time::Instant::now());
+        }
+        if !self.retry_at.is_some_and(|at| std::time::Instant::now() >= at) {
+            return;
+        }
+        let replacement = unsafe {
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), GetModuleHandleW(null()), 0)
+        };
+        if replacement.is_null() {
+            keyforge_core::log_warn!("keyboard hook recovery failed (win32 error {}); retrying in 1 second", unsafe { GetLastError() });
+            self.retry_at = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+        } else {
+            // Keep the previous hook until the replacement is successfully installed.
+            unsafe { UnhookWindowsHookEx(*hook); }
+            *hook = replacement;
+            self.retry_at = None;
+            keyforge_core::log_info!("keyboard hook reinstalled after desktop recovery");
+        }
+    }
+}
 
 /// Session local event all keyforge instances listen on.
 const STOP_EVENT_NAME: &str = "Local\\keyforge-stop";
@@ -425,6 +468,7 @@ pub fn run(host: Box<dyn Host>) -> Result<()> {
         SetConsoleCtrlHandler(Some(ctrl_handler), 1);
     });
     STOP.store(false, Ordering::SeqCst);
+    RECOVERY.store(0, Ordering::SeqCst);
 
     let (stop_event, existed) = create_stop_event();
     if !stop_event.is_null() {
@@ -440,7 +484,7 @@ pub fn run(host: Box<dyn Host>) -> Result<()> {
     let tid = unsafe { GetCurrentThreadId() };
     THREAD_ID.store(tid, Ordering::SeqCst);
 
-    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), GetModuleHandleW(null()), 0) };
+    let mut hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), GetModuleHandleW(null()), 0) };
     if hook.is_null() {
         let error = unsafe { GetLastError() };
         release_stop_event();
@@ -453,7 +497,7 @@ pub fn run(host: Box<dyn Host>) -> Result<()> {
     HOST.with(|slot| *slot.borrow_mut() = Some(host));
     keyforge_core::log_info!("keyboard hook installed (thread {tid}); remapping is live");
     let result = match tray::Tray::new() {
-        Ok(tray) => message_loop(&tray),
+        Ok(tray) => message_loop(&tray, &mut hook),
         Err(error) => Err(error),
     };
 
@@ -478,8 +522,9 @@ fn release_stop_event() {
     }
 }
 
-fn message_loop(tray: &tray::Tray) -> Result<()> {
+fn message_loop(tray: &tray::Tray, hook: &mut Hhook) -> Result<()> {
     let mut msg: Msg = unsafe { std::mem::zeroed() };
+    let mut recovery = HookRecovery::default();
     loop {
         if STOP.load(Ordering::SeqCst) {
             return Ok(());
@@ -506,6 +551,7 @@ fn message_loop(tray: &tray::Tray) -> Result<()> {
         }
 
         loop {
+            recovery.process(hook);
             let has = unsafe { PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) };
             if has == 0 {
                 break;
@@ -528,6 +574,8 @@ fn message_loop(tray: &tray::Tray) -> Result<()> {
             }
         }
 
+        tray.ensure_session_notifications();
+        recovery.process(hook);
         let tick = with_host(|host| host.on_tick()).unwrap_or_default();
         if !tick.is_empty() {
             with_host(|host| deliver(host, tick));

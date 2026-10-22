@@ -248,6 +248,9 @@ cargo test -p keyforge-core                                     # 只看引擎/�
 
 ## 7. Windows 注意事项
 
+- 锁屏/会话断开与休眠时清理按键状态；解锁、返回桌面或唤醒时立即重新安装键盘钩子。
+  安装暂时失败会每秒重试，用户手动暂停的状态保持不变。日志中可查找
+  `keyboard hook reinstalled after desktop recovery` 确认恢复。
 - 必须以**当前登录用户的交互会话**运行；不要做成 Windows 服务（Session 0 看不到键盘）。
   开机自启用 `keyforge service install` 生成计划任务（登录触发）。
 - 不需要管理员权限；但若前台窗口属于**更高完整性级别**的进程（例如以管理员身份运行的程序），
