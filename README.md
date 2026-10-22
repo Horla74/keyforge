@@ -1,14 +1,14 @@
 # keyforge
 
-跨平台键盘改键工具（Rust）。当前完成 **Windows** 后端；Linux / macOS 后端代码已写好骨架但
-**暂停接入**（见下方「进度」）。
+跨平台键盘改键工具（Rust）。已实现 **Windows / Linux** 后端；macOS 尚未实现。
+Linux 已接入 evdev/uinput，真实桌面与键盘仍需实机验证。
 
 - 后台守护进程（`keyforged`）配套 CLI（`keyforge`）；Windows 提供系统托盘菜单
 - 配置为 TOML：支持**组合键**、单键替换、层（layer）、轻按/长按双角色（tap-hold）、
   执行命令、屏蔽按键、按前台程序过滤
 - 配置热重载：**默认关闭**；可从托盘菜单手动重载，或加 `--watch` 后改完文件保存即生效
   （重载会清理当时的改键状态，建议先松开按键）
-- 零第三方平台依赖：Windows 后端直接用 Win32 FFI（`WH_KEYBOARD_LL` + `SendInput`）
+- Windows 无第三方平台依赖：后端直接用 Win32 FFI（`WH_KEYBOARD_LL` + `SendInput`）
 
 ---
 
@@ -17,10 +17,10 @@
 | 平台 | 输入捕获 | 输出注入 | 状态 |
 | --- | --- | --- | --- |
 | Windows | `WH_KEYBOARD_LL` 低级键盘钩子 | `SendInput` | ✅ 已完成（编译、单测、CLI、钩子安装均已实测） |
-| Linux | evdev `EVIOCGRAB` | uinput 虚拟键盘 | ⏸ 代码骨架已写（`crates/keyforge-platform/src/linux.rs`），未接入模块树、未实机验证 |
+| Linux | evdev `EVIOCGRAB` | uinput 虚拟键盘 | ✅ 已接入：设备抓取、热插拔、退出清理、诊断与 stop；实机验证待完成 |
 | macOS | `CGEventTap` | `CGEventPost` | ⏳ 未开始（API 方案已选型：core-graphics + 可访问性授权） |
 
-非 Windows 平台运行时会给出明确提示：`the <os> backend is not implemented in this build yet`。
+macOS 等尚未支持的平台运行时会给出明确提示：`the <os> backend is not implemented in this build yet`。
 
 ---
 
@@ -85,6 +85,70 @@ cargo build --release
 配置路径优先级：`--config` > 环境变量 `KEYFORGE_CONFIG` >
 `%APPDATA%\keyforge\config.toml`（Linux：`$XDG_CONFIG_HOME/keyforge/config.toml`，
 macOS：`~/Library/Application Support/keyforge/config.toml`）。
+
+---
+
+## 2.1 快速开始（Linux）
+
+```bash
+cargo build --release
+./target/release/keyforge init
+./target/release/keyforge check
+sudo modprobe uinput
+```
+
+推荐以普通用户运行。安装仓库中的 udev 规则并加入专用组：
+
+```bash
+sudo groupadd -f keyforge
+sudo usermod -aG keyforge "$USER"
+sudo install -m 644 packaging/linux/60-keyforge.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+sudo udevadm trigger --subsystem-match=input
+sudo udevadm trigger --subsystem-match=misc
+```
+
+注销并重新登录以获得新组权限。该组可读取键盘事件并注入输入，只应加入可信用户。
+如需重启后加载 uinput，可将 `uinput` 写入 `/etc/modules-load.d/keyforge.conf`。
+
+```bash
+./target/release/keyforge devices
+./target/release/keyforge doctor
+./target/release/keyforge run -v
+# 另一终端（同一用户）：
+./target/release/keyforge stop
+```
+
+默认配置为 `$XDG_CONFIG_HOME/keyforge/config.toml`，未设置时使用
+`~/.config/keyforge/config.toml`。临时 root 测试需明确指定普通用户的配置：
+`sudo ./target/release/keyforge run --config "$HOME/.config/keyforge/config.toml"`；
+停止该实例也需使用 `sudo ./target/release/keyforge stop`。
+
+- 输入通过 evdev 抓取并经 uinput 注入，适用于 X11、Wayland 和 Linux 控制台。
+- `Ctrl+C`、`SIGTERM`、`keyforge stop` 均先释放注入键再退出；每个用户只允许一个实例。
+  `stop --force` 在优雅退出超时后使用 SIGKILL，不能保证按键清理。
+- 默认每 3 秒发现新键盘；拔出键盘会释放其持有的按键。多个键盘按住同一键时，最后一个松开才释放。
+- `--watch` 可启用配置热重载；Linux 没有托盘菜单。启动、重载时建议先松开按键。
+- X11 的前台应用过滤需要 `xdotool` 及有效的 DISPLAY/XAUTHORITY。
+  Wayland 下前台应用为未知，`only_in` 不生效，`except_in` 按未知应用规则处理。
+  全局映射不受影响；不需要应用过滤时可加 `--no-app-probe`。
+- `doctor` 尝试创建并销毁虚拟键盘，不注入按键、不抓取物理键盘。
+
+登录自启动（先完成组权限配置）：
+
+```bash
+./target/release/keyforge service install
+mkdir -p ~/.config/systemd/user
+cp "${XDG_CONFIG_HOME:-$HOME/.config}/keyforge/keyforge.service" ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now keyforge
+journalctl --user -u keyforge -f
+# 停止服务，避免 Restart=on-failure 在异常退出后重启：
+systemctl --user stop keyforge
+```
+
+生成的 unit 使用当前构建目录的绝对路径；移动二进制后需要重新生成。
+如果设置了自定义 XDG 配置目录，请相应调整 systemd 用户 unit 的安装目录。
 
 ---
 
@@ -220,7 +284,7 @@ keyforge/
 │  ├─ keyforge-platform/          平台后端
 │  │  ├─ src/windows.rs           WH_KEYBOARD_LL + SendInput + 前台程序 + doctor 探针
 │  │  ├─ src/windows/tray.rs      通知区域图标、重载 / 暂停 / 恢复 / 退出菜单
-│  │  └─ src/linux.rs             ⏸ evdev/uinput 实现（未接入模块树）
+│  │  └─ src/linux.rs             evdev/uinput、热插拔与退出清理
 │  └─ keyforge-daemon/            `keyforge` / `keyforged` 两个二进制
 │     ├─ src/runtime.rs           Host 实现：热重载、命令执行、前台程序轮询、日志
 │     ├─ src/cli.rs               参数解析与子命令
@@ -235,6 +299,7 @@ cargo test                         # 单元测试 + CLI 测试（端到端测试
 cargo test -p keyforge-daemon --test windows_e2e -- --ignored   # 真实按键端到端
 cargo test -p keyforge-daemon --test windows_tray -- --ignored  # 托盘生命周期（需交互桌面且无现有实例）
 cargo test -p keyforge-core                                     # 只看引擎/配置/键码
+cargo test -p keyforge-platform control_is_exclusive -- --ignored # Linux IPC 集成测试（需允许 Unix socket）
 ```
 
 端到端测试（`tests/windows_e2e.rs`）会：启动真实的 `keyforged`、等钩子安装完成、
@@ -261,8 +326,9 @@ cargo test -p keyforge-core                                     # 只看引擎/�
 
 ## 8. 已知限制 / 路线图
 
-- Linux / macOS 后端：代码骨架已完成，需接入模块树 + 依赖（`evdev` / `core-graphics`）并实机验证；
-  Linux 启动需要 `sudo` 或 `input` 组 + uinput 权限，macOS 需要「辅助功能」授权。
+- Linux 后端已实现，真实硬件/桌面验证待完成。没有托盘；键盘 LED 状态尚未回写物理设备。
+  仅抓取包含 A/Z/Enter/Space 且不含鼠标/触摸板轴的键盘节点，独立媒体键节点不接管。
+- macOS 后端尚未实现，计划使用 `CGEventTap` / `CGEventPost` 和「辅助功能」授权。
 - Windows 已提供托盘控制，尚未包含配置编辑图形界面；后续可加 GPUI 前端
   （读写同一份 TOML，通过 `--output`/配置热重载生效）。
 - 输入法/Unicode 输入（发送任意字符串）未实现，目前只合成按键。

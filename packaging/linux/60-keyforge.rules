@@ -1,0 +1,3 @@
+# Members of keyforge can read keyboards and inject input. Add trusted users only.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", GROUP="keyforge", MODE="0660"
+SUBSYSTEM=="misc", KERNEL=="uinput", GROUP="keyforge", MODE="0660"

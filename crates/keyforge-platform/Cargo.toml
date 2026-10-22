@@ -1,6 +1,6 @@
 [package]
 name = "keyforge-platform"
-description = "Platform input backends (Windows implemented; Linux/macOS in progress) for keyforge"
+description = "Platform input backends (Windows and Linux implemented) for keyforge"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,3 +8,7 @@ license.workspace = true
 
 [dependencies]
 keyforge-core = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+evdev = { workspace = true }
+libc = { workspace = true }

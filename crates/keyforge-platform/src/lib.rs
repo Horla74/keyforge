@@ -2,9 +2,7 @@
 //!
 //! Status (see README):
 //! * **Windows** — implemented: `WH_KEYBOARD_LL` hook + `SendInput`.
-//! * Linux — an in-progress evdev/uinput backend lives in `linux.rs`; it is not
-//!   part of the module tree yet, so every entry point below returns a clear
-//!   error on non-Windows platforms.
+//! * **Linux** — evdev grabs + uinput virtual keyboard.
 //! * macOS — not started yet (`CGEventTap` is the planned mechanism).
 //!
 //! The shared [`Host`] contract is platform independent: physical key
@@ -15,11 +13,10 @@ use std::fmt;
 use keyforge_core::engine::{KeyState, Outcome, Output};
 use keyforge_core::KeyCode;
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 mod windows;
-// Kept for the next milestone; not part of the module tree yet so that the
-// crate builds (and is testable) without the Linux dependencies.
-// #[cfg(target_os = "linux")] mod linux;
 
 /// Something the daemon has to provide to a backend.
 pub trait Host {
@@ -92,14 +89,20 @@ impl std::error::Error for Error {}
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Options for the platform backend.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Options {
-    /// Linux only (future): only grab devices whose name contains one of these.
+    /// Linux only: only grab devices whose name contains one of these.
     pub device_filter: Vec<String>,
     /// Whether the focused application may be probed (`only_in` / `except_in`).
     pub app_probe: bool,
-    /// Linux only (future): how often to look for hot-plugged keyboards.
+    /// Linux only: how often to look for hot-plugged keyboards.
     pub rescan_interval: std::time::Duration,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Options {
@@ -119,12 +122,16 @@ pub fn run(host: Box<dyn Host>, options: Options) -> Result<()> {
         let _ = options;
         windows::run(host)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::run(host, options)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = (host, options);
         Err(Error::new(format!(
             "the {} backend is not implemented in this build yet; \
-             only Windows is supported at the moment",
+             Windows and Linux are supported at the moment",
             platform_name()
         )))
     }
@@ -134,6 +141,8 @@ pub fn run(host: Box<dyn Host>, options: Options) -> Result<()> {
 pub fn request_stop() {
     #[cfg(windows)]
     windows::request_stop();
+    #[cfg(target_os = "linux")]
+    linux::request_stop();
 }
 
 /// Ask *another* keyforge instance to stop gracefully.
@@ -144,7 +153,11 @@ pub fn signal_stop() -> Result<bool> {
     {
         windows::signal_stop().map_err(Error::new)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::signal_stop()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err(Error::new("`stop` is only implemented on Windows for now"))
     }
@@ -156,7 +169,11 @@ pub fn instance_running() -> bool {
     {
         windows::instance_running()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::instance_running()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         false
     }
@@ -164,7 +181,7 @@ pub fn instance_running() -> bool {
 
 /// Is a working backend compiled into this binary?
 pub fn backend_available() -> bool {
-    cfg!(windows)
+    cfg!(any(windows, target_os = "linux"))
 }
 
 /// Does the backend drop every event it does not swallow, so that the engine
@@ -210,10 +227,14 @@ pub fn startup_warnings() -> Vec<String> {
         }
         warnings
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::startup_warnings()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         vec![format!(
-            "the {} backend is not implemented in this build (Windows only for now)",
+            "the {} backend is not implemented in this build (Windows and Linux only for now)",
             platform_name()
         )]
     }
@@ -226,7 +247,9 @@ pub fn startup_warnings() -> Vec<String> {
 pub fn integrity_below_medium() -> bool {
     #[cfg(windows)]
     {
-        windows::integrity_rid().map(|rid| rid < 0x2000).unwrap_or(false)
+        windows::integrity_rid()
+            .map(|rid| rid < 0x2000)
+            .unwrap_or(false)
     }
     #[cfg(not(windows))]
     {
@@ -270,9 +293,13 @@ pub fn permission_hint() -> Option<&'static str> {
     {
         None
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        Some("only the Windows backend is implemented in this build")
+        Some("Linux needs read access to /dev/input/event* and write access to /dev/uinput; load uinput with sudo modprobe uinput and install packaging/linux/60-keyforge.rules (see README).")
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Some("only the Windows and Linux backends are implemented in this build")
     }
 }
 
@@ -286,7 +313,11 @@ pub fn frontmost_app(options: &Options) -> Option<String> {
     {
         windows::frontmost_app()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::frontmost_app(options)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         None
     }
@@ -302,7 +333,11 @@ pub fn list_devices(options: &Options) -> Result<Vec<String>> {
              (all keyboards are covered)",
         ))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::list_devices(options)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         Err(Error::new("device listing is only implemented on Linux"))
     }
@@ -329,9 +364,8 @@ pub fn diagnostics() -> Vec<String> {
             Err(e) => lines.push(format!("low level keyboard hook: NOT available ({e})")),
         }
         match windows::probe_hook_roundtrip() {
-            Ok(true) => lines.push(
-                "hook round trip: OK (an injected F13 was observed by the hook)".to_string(),
-            ),
+            Ok(true) => lines
+                .push("hook round trip: OK (an injected F13 was observed by the hook)".to_string()),
             Ok(false) => lines.push(
                 "hook round trip: no event observed — normally caused by UIPI (low integrity \
                  session) or by another process blocking input"
@@ -391,11 +425,21 @@ pub fn diagnostics() -> Vec<String> {
         }
         lines
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::diagnostics()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         vec![format!(
-            "{} backend is not implemented in this build; only Windows is supported for now",
+            "{} backend is not implemented in this build; Windows and Linux are supported",
             platform_name()
         )]
     }
+}
+
+/// Force termination of the Linux instance selected by authenticated IPC.
+#[cfg(target_os = "linux")]
+pub fn force_stop() -> Result<()> {
+    linux::force_stop()
 }

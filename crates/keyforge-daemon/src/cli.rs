@@ -466,6 +466,9 @@ fn cmd_stop(args: &Args) -> Result<i32, String> {
             return Ok(1);
         }
         println!("forcing termination");
+        #[cfg(target_os = "linux")]
+        platform::force_stop().map_err(|e| e.to_string())?;
+        #[cfg(windows)]
         for image in ["keyforged.exe", "keyforge.exe"] {
             let _ = std::process::Command::new("taskkill")
                 .args(["/IM", image, "/F"])
@@ -474,8 +477,7 @@ fn cmd_stop(args: &Args) -> Result<i32, String> {
         std::thread::sleep(std::time::Duration::from_millis(300));
         if platform::instance_running() {
             eprintln!(
-                "something is still holding the stop event; check Task Manager for\n\
-                 keyforged.exe and end it manually, then tap any stuck modifier key once."
+                "the daemon is still running; terminate it manually, then tap any stuck modifier key once."
             );
             return Ok(1);
         }
