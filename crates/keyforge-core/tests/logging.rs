@@ -18,8 +18,32 @@ fn disabled_logging_creates_nothing_and_can_be_toggled() {
     logging::maintenance().unwrap();
     assert!(!dir.exists());
     assert!(!logging::level_enabled(LogLevel::Error));
+    let evaluated = std::cell::Cell::new(0);
+    let argument = || {
+        evaluated.set(evaluated.get() + 1);
+        "expensive argument"
+    };
+    keyforge_core::log_error!("{}", argument());
+    keyforge_core::log_warn!("{}", argument());
+    keyforge_core::log_info!("{}", argument());
+    keyforge_core::log_debug!("{}", argument());
+    keyforge_core::log_trace!("{}", argument());
+    assert_eq!(
+        evaluated.get(),
+        0,
+        "disabled logs must not evaluate arguments"
+    );
 
     logging::reconfigure(true, 1, 1).unwrap();
+    keyforge_core::log_debug!("{}", argument());
+    keyforge_core::log_trace!("{}", argument());
+    assert_eq!(
+        evaluated.get(),
+        0,
+        "filtered levels must not evaluate arguments"
+    );
+    log_info!("{}", argument());
+    assert_eq!(evaluated.get(), 1);
     log_info!("first enabled record");
     let contents = fs::read_to_string(&path).unwrap();
     assert!(contents.contains("first enabled record"));

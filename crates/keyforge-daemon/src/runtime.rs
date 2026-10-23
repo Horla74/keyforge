@@ -217,6 +217,9 @@ impl Host for DaemonHost {
         if self.paused {
             return Outcome::default();
         }
+        self.engine.set_activation_logging(keyforge_core::logging::level_enabled(
+            keyforge_core::config::LogLevel::Info,
+        ));
         let outcome = self.engine.on_key(key, state);
         if let Some(what) = self.engine.take_last_activation() {
             log_info!(

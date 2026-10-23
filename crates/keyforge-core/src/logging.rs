@@ -164,25 +164,45 @@ fn timestamp() -> String {
 
 #[macro_export]
 macro_rules! log_error {
-    ($($arg:tt)*) => { $crate::logging::log($crate::config::LogLevel::Error, format_args!($($arg)*)) };
+    ($($arg:tt)*) => {{
+        if $crate::logging::level_enabled($crate::config::LogLevel::Error) {
+            $crate::logging::log($crate::config::LogLevel::Error, format_args!($($arg)*));
+        }
+    }};
 }
 
 #[macro_export]
 macro_rules! log_warn {
-    ($($arg:tt)*) => { $crate::logging::log($crate::config::LogLevel::Warn, format_args!($($arg)*)) };
+    ($($arg:tt)*) => {{
+        if $crate::logging::level_enabled($crate::config::LogLevel::Warn) {
+            $crate::logging::log($crate::config::LogLevel::Warn, format_args!($($arg)*));
+        }
+    }};
 }
 
 #[macro_export]
 macro_rules! log_info {
-    ($($arg:tt)*) => { $crate::logging::log($crate::config::LogLevel::Info, format_args!($($arg)*)) };
+    ($($arg:tt)*) => {{
+        if $crate::logging::level_enabled($crate::config::LogLevel::Info) {
+            $crate::logging::log($crate::config::LogLevel::Info, format_args!($($arg)*));
+        }
+    }};
 }
 
 #[macro_export]
 macro_rules! log_debug {
-    ($($arg:tt)*) => { $crate::logging::log($crate::config::LogLevel::Debug, format_args!($($arg)*)) };
+    ($($arg:tt)*) => {{
+        if $crate::logging::level_enabled($crate::config::LogLevel::Debug) {
+            $crate::logging::log($crate::config::LogLevel::Debug, format_args!($($arg)*));
+        }
+    }};
 }
 
 #[macro_export]
 macro_rules! log_trace {
-    ($($arg:tt)*) => { $crate::logging::log($crate::config::LogLevel::Trace, format_args!($($arg)*)) };
+    ($($arg:tt)*) => {{
+        if $crate::logging::level_enabled($crate::config::LogLevel::Trace) {
+            $crate::logging::log($crate::config::LogLevel::Trace, format_args!($($arg)*));
+        }
+    }};
 }

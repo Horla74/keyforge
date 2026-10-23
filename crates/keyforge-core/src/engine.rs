@@ -5,9 +5,10 @@
 //! decision "swallow this?" together with the events that must be injected.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::config::{Action, CompiledConfig, CompiledMap, ComboMode};
+use crate::config::{Action, ComboMode, CompiledConfig};
 use crate::keycode::{KeyCode, KeyMatcher};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,7 +76,7 @@ struct Pending {
 }
 
 pub struct Engine {
-    cfg: CompiledConfig,
+    cfg: Arc<CompiledConfig>,
     /// Physical keys currently held, in press order.
     pressed: Vec<KeyCode>,
     /// Keys the OS currently has down, and who put them there.
@@ -99,14 +100,17 @@ pub struct Engine {
     front_app: Option<String>,
     /// `"<origin>: <trigger> -> <action>"` of the most recent activation.
     last_activation: Option<String>,
+    activation_logging: bool,
     pub stats: Stats,
 }
 
 impl Engine {
     pub fn new(cfg: CompiledConfig) -> Engine {
         let defer_meta = cfg.uses_meta_trigger();
+        let activation_logging =
+            cfg.general.log_enabled && cfg.general.log_level >= crate::config::LogLevel::Info;
         Engine {
-            cfg,
+            cfg: Arc::new(cfg),
             pressed: Vec::new(),
             emitted: HashMap::new(),
             reinject_passthrough: false,
@@ -119,6 +123,7 @@ impl Engine {
             pending: None,
             front_app: None,
             last_activation: None,
+            activation_logging,
             stats: Stats::default(),
         }
     }
@@ -126,6 +131,14 @@ impl Engine {
     /// Mapping description of the most recent activation, for logs and tests.
     pub fn take_last_activation(&mut self) -> Option<String> {
         self.last_activation.take()
+    }
+
+    /// Let the host apply its effective log level (including CLI overrides).
+    pub fn set_activation_logging(&mut self, enabled: bool) {
+        self.activation_logging = enabled;
+        if !enabled {
+            self.last_activation = None;
+        }
     }
 
     /// Release every key we injected and forget all transient state.
@@ -245,7 +258,11 @@ impl Engine {
             }
         }
         self.defer_meta = cfg.uses_meta_trigger();
-        self.cfg = cfg;
+        self.set_activation_logging(
+            cfg.general.log_enabled && cfg.general.log_level >= crate::config::LogLevel::Info,
+        );
+        self.last_activation = None;
+        self.cfg = Arc::new(cfg);
         outputs
     }
 
@@ -274,7 +291,9 @@ impl Engine {
 
     /// How long the backend may sleep before calling [`Engine::on_tick`].
     pub fn time_until_deadline(&self, now: Instant) -> Option<Duration> {
-        self.pending.as_ref().map(|p| p.deadline.saturating_duration_since(now))
+        self.pending
+            .as_ref()
+            .map(|p| p.deadline.saturating_duration_since(now))
     }
 
     // -- internals ----------------------------------------------------------
@@ -302,12 +321,10 @@ impl Engine {
                 consumed: false,
             });
             if let Some((pi, mi)) = self.resolve() {
-                let profile = self.cfg.profiles[pi].name.clone();
-                let map = self.cfg.profiles[pi].maps[mi].clone();
                 if let Some(deferred) = &mut self.deferred_meta {
                     deferred.consumed = true;
                 }
-                outputs.extend(self.activate(&map, &profile, key, now));
+                outputs.extend(self.activate(pi, mi, key, now));
                 return Outcome {
                     swallow: true,
                     outputs,
@@ -340,9 +357,7 @@ impl Engine {
 
         match resolved {
             Some((pi, mi)) => {
-                let profile = self.cfg.profiles[pi].name.clone();
-                let map = self.cfg.profiles[pi].maps[mi].clone();
-                outputs.extend(self.activate(&map, &profile, key, now));
+                outputs.extend(self.activate(pi, mi, key, now));
                 Outcome {
                     swallow: true,
                     outputs,
@@ -412,10 +427,7 @@ impl Engine {
         let mut idx = self.active.len();
         while idx > 0 {
             idx -= 1;
-            let hit = self.active[idx]
-                .trigger
-                .iter()
-                .any(|m| m.matches(key));
+            let hit = self.active[idx].trigger.iter().any(|m| m.matches(key));
             if hit {
                 let a = self.active.remove(idx);
                 outputs.extend(self.deactivate(a));
@@ -456,18 +468,25 @@ impl Engine {
 
     fn activate(
         &mut self,
-        map: &CompiledMap,
-        profile: &str,
+        profile_index: usize,
+        map_index: usize,
         key: KeyCode,
         now: Instant,
     ) -> Vec<Output> {
         self.stats.activations += 1;
-        self.last_activation = Some(format!(
-            "{}: {} -> {}",
-            map.origin,
-            map.trigger_label(),
-            map.action.describe()
-        ));
+        // Share the immutable configuration while mutating input state. Cloning
+        // this Arc only increments a count; it never copies maps or strings.
+        let cfg = Arc::clone(&self.cfg);
+        let profile = &cfg.profiles[profile_index].name;
+        let map = &cfg.profiles[profile_index].maps[map_index];
+        if self.activation_logging {
+            self.last_activation = Some(format!(
+                "{}: {} -> {}",
+                map.origin,
+                map.trigger_label(),
+                map.action.describe()
+            ));
+        }
         let mut outputs = Vec::new();
 
         match &map.action {
