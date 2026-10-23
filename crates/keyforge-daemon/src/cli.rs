@@ -558,12 +558,13 @@ fn cmd_run(args: &Args, background: bool) -> Result<i32, String> {
         .as_ref()
         .map(|config| config.general.clone())
         .unwrap_or_default();
-    logging::init_with_rotation(
+    logging::init_configured(
         level,
         log_file.as_deref(),
         true,
         general.log_max_size_mb,
         general.log_retention_days,
+        general.log_enabled,
     )
     .map_err(|e| format!("cannot open the log file: {e}"))?;
 

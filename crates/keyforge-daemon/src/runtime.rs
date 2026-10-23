@@ -122,10 +122,14 @@ impl DaemonHost {
     fn reload(&mut self) -> Vec<Output> {
         match load_compiled(&self.config_path) {
             Ok(cfg) => {
-                keyforge_core::logging::set_rotation(
+                if let Err(error) = keyforge_core::logging::reconfigure(
+                    cfg.general.log_enabled,
                     cfg.general.log_max_size_mb,
                     cfg.general.log_retention_days,
-                );
+                ) {
+                    log_error!("cannot apply logging settings, keeping previous configuration: {error}");
+                    return Vec::new();
+                }
                 log_info!(
                     "reloading {} ({} profiles, {} mappings); keys held right now \
                      are released — prefer restarting while typing",
@@ -235,6 +239,9 @@ impl Host for DaemonHost {
 
     fn on_tick(&mut self) -> Vec<Output> {
         let mut outputs = self.reload_if_changed();
+        if let Err(error) = keyforge_core::logging::maintenance() {
+            log_error!("cannot clean up log archives: {error}");
+        }
         if !self.paused {
             outputs.extend(self.engine.on_tick(Instant::now()));
         }

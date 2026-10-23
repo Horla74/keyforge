@@ -96,6 +96,7 @@ default_profile = "default"   # 基础层（profile）名字
 tap_hold_ms     = 200         # tap_hold 判定为“长按”的毫秒数
 combo_mode      = "exact"     # exact：按键集合必须完全等于组合；subset：组合是子集即可
 log_level       = "info"      # error | warn | info | debug | trace
+log_enabled     = true        # false：不输出日志、不创建日志文件，支持重载
 log_max_size_mb  = 10          # 单个日志文件上限，单位 MiB，必须为正整数
 log_retention_days = 7         # 归档保留天数，必须为正整数
 # log_file      = 'C:\Users\me\AppData\Roaming\keyforge\keyforge.log'
@@ -110,9 +111,16 @@ tap_hold = { tap = "escape", hold = "leftctrl" }
 ```
 
 日志在下一条记录将超过大小上限时归档；单条超大记录会完整保留，可能单独超过上限。
+设置 `[general]` 中的 `log_enabled = false` 可关闭日志（文件和 stderr），优先于 `--log-file`
+与 `--log-level`。关闭后不创建日志目录或文件，不写入或清理已有日志；已有文件会保留。
+修改后点击 **Reload config**（或使用 `--watch`），设回 `true` 可恢复日志。
+配置解析失败等启动错误仍会显示错误提示。
 持续运行时也会按 24 小时归档。归档保存在日志文件旁，格式为
-`keyforge.log.archive-<Unix时间戳>-<序号>.log`。启动时和写日志时（最多每小时一次）
-清理超过保留天数的归档，不删除其他文件。大小与保留天数支持 **Reload config** / `--watch`
+`keyforge.log.archive-<Unix时间戳>-<序号>.log`。保留时间从文件名中的归档时间起算，
+`log_retention_days = 1` 表示归档满 24 小时。启动时检查清理，运行中每分钟独立检查一次，
+即使没有新日志或处于暂停状态也会清理。修改保留天数并成功重载后，下一次定时处理立即检查。
+只删除当前日志对应的过期归档；单个文件被占用时继续清理其他文件，并在后续检查重试。
+大小与保留天数支持 **Reload config** / `--watch`
 生效；日志路径和日志级别的更改仍需重启。
 
 ### 3.1 触发器

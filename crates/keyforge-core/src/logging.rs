@@ -5,7 +5,8 @@
 
 use std::fmt;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,7 +17,9 @@ use file::RollingFile;
 
 struct Sink {
     level: LogLevel,
-    file: Option<Mutex<RollingFile>>,
+    enabled: AtomicBool,
+    path: Option<PathBuf>,
+    file: Mutex<Option<RollingFile>>,
     stderr: bool,
 }
 
@@ -34,6 +37,17 @@ pub fn init_with_rotation(
     max_size_mb: u64,
     retention_days: u32,
 ) -> std::io::Result<()> {
+    init_configured(level, file, stderr, max_size_mb, retention_days, true)
+}
+
+pub fn init_configured(
+    level: LogLevel,
+    file: Option<&Path>,
+    stderr: bool,
+    max_size_mb: u64,
+    retention_days: u32,
+    enabled: bool,
+) -> std::io::Result<()> {
     let max_bytes = max_size_mb
         .checked_mul(1024 * 1024)
         .filter(|n| *n > 0)
@@ -44,39 +58,66 @@ pub fn init_with_rotation(
                 "log size and retention days must be positive and within range",
             )
         })?;
-    let opened = match file {
-        Some(path) => Some(Mutex::new(RollingFile::open(
-            path,
-            max_bytes,
-            retention_days,
-        )?)),
+    let opened = match file.filter(|_| enabled) {
+        Some(path) => Some(RollingFile::open(path, max_bytes, retention_days)?),
         None => None,
     };
     let _ = SINK.set(Sink {
         level,
-        file: opened,
+        enabled: AtomicBool::new(enabled),
+        path: file.map(Path::to_path_buf),
+        file: Mutex::new(opened),
         stderr,
     });
     Ok(())
 }
 
-/// Apply rotation settings from a successfully validated config reload.
-pub fn set_rotation(max_size_mb: u64, retention_days: u32) {
-    if let Some(max_bytes) = max_size_mb.checked_mul(1024 * 1024).filter(|n| *n > 0) {
-        if retention_days == 0 {
-            return;
-        }
-        if let Some(file) = SINK.get().and_then(|s| s.file.as_ref()) {
-            if let Ok(mut file) = file.lock() {
+/// Apply logging and rotation settings from a validated config reload.
+pub fn reconfigure(enabled: bool, max_size_mb: u64, retention_days: u32) -> std::io::Result<()> {
+    let max_bytes = max_size_mb
+        .checked_mul(1024 * 1024)
+        .filter(|n| *n > 0)
+        .filter(|_| retention_days > 0)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid log rotation limits",
+            )
+        })?;
+    if let Some(sink) = SINK.get() {
+        let mut file = sink.file.lock().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "log file lock poisoned")
+        })?;
+        if enabled {
+            if let Some(file) = file.as_mut() {
                 file.set_limits(max_bytes, retention_days);
+            } else if let Some(path) = &sink.path {
+                *file = Some(RollingFile::open(path, max_bytes, retention_days)?);
             }
+        } else {
+            file.take(); // close the file and stop both writes and archive cleanup
+        }
+        sink.enabled.store(enabled, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Run retention independently of log traffic and the configured log level.
+pub fn maintenance() -> std::io::Result<()> {
+    if let Some(sink) = SINK.get().filter(|s| s.enabled.load(Ordering::Relaxed)) {
+        let mut file = sink.file.lock().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "log file lock poisoned")
+        })?;
+        if let Some(file) = file.as_mut() {
+            file.maintain(file::now())?;
         }
     }
+    Ok(())
 }
 
 pub fn level_enabled(level: LogLevel) -> bool {
     match SINK.get() {
-        Some(s) => level <= s.level,
+        Some(s) => s.enabled.load(Ordering::Relaxed) && level <= s.level,
         None => level <= LogLevel::Info,
     }
 }
@@ -98,8 +139,8 @@ pub fn log(level: LogLevel, args: fmt::Arguments<'_>) {
             if sink.stderr {
                 let _ = writeln!(std::io::stderr(), "{line}");
             }
-            if let Some(file) = &sink.file {
-                if let Ok(mut f) = file.lock() {
+            if let Ok(mut file) = sink.file.lock() {
+                if let Some(f) = file.as_mut() {
                     if let Err(error) = f.write(&line, file::now()) {
                         let _ = writeln!(std::io::stderr(), "log file error: {error}\n{line}");
                     }

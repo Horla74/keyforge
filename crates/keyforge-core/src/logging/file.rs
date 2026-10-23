@@ -5,13 +5,14 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DAY: u64 = 86400;
+const CLEANUP_INTERVAL: u64 = 60;
 
 pub(super) struct RollingFile {
     path: PathBuf,
     file: Option<File>,
     size: u64,
     started: u64,
-    last_cleanup: u64,
+    last_cleanup: Option<u64>,
     max_bytes: u64,
     keep_days: u32,
 }
@@ -41,7 +42,7 @@ impl RollingFile {
             file: Some(file),
             size: metadata.len(),
             started,
-            last_cleanup: 0,
+            last_cleanup: None,
             max_bytes,
             keep_days,
         };
@@ -52,7 +53,7 @@ impl RollingFile {
     pub(super) fn set_limits(&mut self, max_bytes: u64, keep_days: u32) {
         self.max_bytes = max_bytes;
         self.keep_days = keep_days;
-        self.last_cleanup = 0;
+        self.last_cleanup = None;
     }
 
     fn prefix(&self) -> String {
@@ -71,9 +72,23 @@ impl RollingFile {
 
     fn cleanup(&mut self, now: u64) -> io::Result<()> {
         let prefix = self.prefix();
+        let mut first_error = None;
         for entry in fs::read_dir(self.parent())? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            let file_type = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            if !file_type.is_file() {
                 continue;
             }
             let name = entry.file_name();
@@ -93,12 +108,36 @@ impl RollingFile {
             }
             if let Ok(seconds) = seconds.parse::<u64>() {
                 if now.saturating_sub(seconds) >= u64::from(self.keep_days) * DAY {
-                    fs::remove_file(entry.path())?;
+                    if let Err(error) = fs::remove_file(entry.path()) {
+                        // One locked archive must not prevent removing other expired files.
+                        first_error.get_or_insert_with(|| {
+                            io::Error::new(
+                                error.kind(),
+                                format!("{}: {error}", entry.path().display()),
+                            )
+                        });
+                    }
                 }
             }
         }
-        self.last_cleanup = now;
-        Ok(())
+        self.last_cleanup = Some(now);
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Called by the daemon timer even when no log records are produced.
+    pub(super) fn maintain(&mut self, now: u64) -> io::Result<()> {
+        if self
+            .last_cleanup
+            .is_some_and(|last| now >= last && now - last < CLEANUP_INTERVAL)
+        {
+            return Ok(());
+        }
+        // Throttle failed attempts too, without making a failed deletion permanent.
+        self.last_cleanup = Some(now);
+        self.cleanup(now)
     }
 
     fn rotate(&mut self, now: u64) -> io::Result<()> {
@@ -131,12 +170,8 @@ impl RollingFile {
     }
 
     pub(super) fn write(&mut self, line: &str, now: u64) -> io::Result<()> {
-        if now.saturating_sub(self.last_cleanup) >= 3600 {
-            if let Err(error) = self.cleanup(now) {
-                let _ = writeln!(io::stderr(), "cannot clean up log archives: {error}");
-                self.last_cleanup = now;
-            }
-        }
+        // Filesystem scans are performed on the daemon timer, not inside the
+        // keyboard hook that may be writing this record.
         let bytes = line.len() as u64 + 1;
         if self.size != 0
             && (self.size.saturating_add(bytes) > self.max_bytes
@@ -186,6 +221,7 @@ mod tests {
         let unrelated = dir.join("test.log.archive-not-a-timestamp.log");
         fs::write(&unrelated, "keep me").unwrap();
         log.set_limits(100, 1);
+        log.maintain(time + DAY).unwrap();
         log.write("new day", time + DAY).unwrap();
         assert!(!archive.exists());
         assert!(unrelated.exists());
@@ -195,6 +231,74 @@ mod tests {
         for entry in fs::read_dir(&dir).unwrap() {
             fs::remove_file(entry.unwrap().path()).unwrap();
         }
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn idle_cleanup_and_shortened_retention_do_not_need_a_log_record() {
+        let dir = std::env::temp_dir().join(format!("keyforge-log-idle-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("idle.log");
+        let time = now();
+        let mut log = RollingFile::open(&path, 1024, 7).unwrap();
+        let old = dir.join(format!("idle.log.archive-{}-0.log", time - 2 * DAY));
+        let recent = dir.join(format!("idle.log.archive-{}-0.log", time - DAY + 61));
+        let other = dir.join(format!("other.log.archive-{}-0.log", time - 9 * DAY));
+        for p in [&old, &recent, &other] {
+            fs::write(p, "record").unwrap();
+        }
+        log.maintain(time + 60).unwrap();
+        assert!(
+            old.exists(),
+            "seven-day policy should keep a two-day archive"
+        );
+        log.set_limits(1024, 1);
+        log.maintain(time + 60).unwrap(); // policy change bypasses the previous scan deadline
+        assert!(!old.exists());
+        assert!(recent.exists(), "not yet 24 hours old");
+        log.maintain(time + 120).unwrap();
+        assert!(
+            !recent.exists(),
+            "idle timer must remove the newly expired archive"
+        );
+        assert!(other.exists(), "other log families must be untouched");
+        assert_eq!(
+            fs::metadata(&path).unwrap().len(),
+            0,
+            "no log write was needed"
+        );
+        drop(log);
+        fs::remove_file(other).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_archive_does_not_block_other_deletions_and_is_retried() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("keyforge-log-locked-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("locked.log");
+        let time = now();
+        let mut log = RollingFile::open(&path, 1024, 1).unwrap();
+        let locked = dir.join(format!("locked.log.archive-{}-0.log", time - 2 * DAY));
+        let free = dir.join(format!("locked.log.archive-{}-1.log", time - 2 * DAY));
+        fs::write(&locked, "locked").unwrap();
+        fs::write(&free, "free").unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked)
+            .unwrap();
+        assert!(log.maintain(time + 60).is_err());
+        assert!(locked.exists());
+        assert!(!free.exists());
+        drop(lock);
+        log.maintain(time + 120).unwrap();
+        assert!(!locked.exists());
+        drop(log);
+        fs::remove_file(path).unwrap();
         fs::remove_dir(dir).unwrap();
     }
 }

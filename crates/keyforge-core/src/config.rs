@@ -39,6 +39,9 @@ pub struct General {
     pub combo_mode: ComboMode,
     #[serde(default)]
     pub log_level: LogLevel,
+    /// Disable all daemon logging and file maintenance when false.
+    #[serde(default = "default_log_enabled")]
+    pub log_enabled: bool,
     /// Optional log file (in addition to stderr).
     #[serde(default)]
     pub log_file: Option<String>,
@@ -60,6 +63,7 @@ impl Default for General {
             tap_hold_ms: default_tap_hold_ms(),
             combo_mode: ComboMode::default(),
             log_level: LogLevel::default(),
+            log_enabled: true,
             log_file: None,
             log_max_size_mb: default_log_max_size_mb(),
             log_retention_days: default_log_retention_days(),
@@ -75,6 +79,8 @@ fn default_profile_name() -> String {
 fn default_log_max_size_mb() -> u64 {
     10
 }
+
+fn default_log_enabled() -> bool { true }
 fn default_log_retention_days() -> u32 {
     7
 }
@@ -86,6 +92,9 @@ mod log_config_tests {
     #[test]
     fn logging_defaults_and_limits_are_validated() {
         let cfg = CompiledConfig::from_toml_str("[profiles.default]").unwrap();
+        assert!(cfg.general.log_enabled);
+        let disabled = CompiledConfig::from_toml_str("[general]\nlog_enabled = false\n[profiles.default]").unwrap();
+        assert!(!disabled.general.log_enabled);
         assert_eq!(cfg.general.log_max_size_mb, 10);
         assert_eq!(cfg.general.log_retention_days, 7);
         let cfg = CompiledConfig::from_toml_str("[general]\nlog_max_size_mb = 2\nlog_retention_days = 3\n[profiles.default]").unwrap();
